@@ -141,7 +141,7 @@ internal sealed partial class NpiSearchPage : DynamicListPage
 
         var parts = new[] { b.NamePrefix, b.FirstName, b.MiddleName, b.LastName }
             .Where(p => !string.IsNullOrWhiteSpace(p) && p != "--")
-            .Select(Title);
+            .Select(Cap);
         var name = string.Join(' ', parts);
         return string.IsNullOrWhiteSpace(b.Credential) ? name : $"{name}, {b.Credential!.Trim()}";
     }
