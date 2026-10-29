@@ -1,9 +1,11 @@
 name: Release
 
-# Push a tag like v1.2.3 to build the MSIX packages and attach them to a GitHub release.
+# Push a tag like v1.2.3 to build signed MSIX packages and attach them to a GitHub release.
+# Run manually (workflow_dispatch) to test the build and signing without publishing a release.
 on:
   push:
     tags: [ "v[0-9]+.[0-9]+.[0-9]+" ]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,11 +17,6 @@ jobs:
   package:
     runs-on: windows-latest
 
-    strategy:
-      fail-fast: true
-      matrix:
-        platform: [x64, ARM64]
-
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -29,55 +26,118 @@ jobs:
       with:
         dotnet-version: 10.0.x
 
-    # v1.2.3 -> package version 1.2.3.0
-    - name: Stamp package version from tag
+    # Uses the SIGNING_PFX_BASE64 / SIGNING_PFX_PASSWORD secrets when set (a stable certificate, so users
+    # trust it once). Otherwise creates a new self-signed certificate for this run.
+    - name: Prepare signing certificate
+      shell: powershell
+      env:
+        PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
+        PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $pfxPath = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+        if ($env:PFX_BASE64) {
+          $password = $env:PFX_PASSWORD
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:PFX_BASE64))
+          $cert = New-Object Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $password)
+        } else {
+          $password = [guid]::NewGuid().ToString('N')
+          $cert = New-SelfSignedCertificate -Type Custom -Subject 'CN=Developer' `
+            -KeyUsage DigitalSignature -KeyExportPolicy Exportable `
+            -FriendlyName 'NPI Registry (self-signed)' -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -NotAfter (Get-Date).AddYears(3) `
+            -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secure | Out-Null
+        }
+        Write-Host "::add-mask::$password"
+        New-Item -ItemType Directory -Force -Path dist | Out-Null
+        Export-Certificate -Cert $cert -FilePath 'dist\NpiRegistry.cer' | Out-Null
+        Add-Content $env:GITHUB_ENV "SIGN_PFX=$pfxPath"
+        Add-Content $env:GITHUB_ENV "SIGN_PASSWORD=$password"
+        Add-Content $env:GITHUB_ENV "SIGN_SUBJECT=$($cert.Subject)"
+        Add-Content $env:GITHUB_ENV "SIGN_THUMBPRINT=$($cert.Thumbprint)"
+        Write-Host "Signing as $($cert.Subject) ($($cert.Thumbprint))"
+
+    # The manifest Publisher must equal the certificate subject. On tag builds, v1.2.3 -> 1.2.3.0.
+    - name: Stamp manifest
+      shell: powershell
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $path = Join-Path $env:GITHUB_WORKSPACE 'NpiRegistry\Package.appxmanifest'
+        $xml = [IO.File]::ReadAllText($path)
+        $xml = [regex]::Replace($xml, '(?s)(<Identity\b[^>]*?\bPublisher=")[^"]*', ('${1}' + $env:SIGN_SUBJECT))
+        if ($env:GITHUB_REF -like 'refs/tags/v*') {
+          $version = $env:GITHUB_REF_NAME.TrimStart('v') + '.0'
+          $xml = [regex]::Replace($xml, '(?s)(<Identity\b[^>]*?\bVersion=")[^"]+', ('${1}' + $version))
+          Write-Host "Package version: $version"
+        }
+        [IO.File]::WriteAllText($path, $xml, (New-Object Text.UTF8Encoding $false))
+        Select-String -Path $path -Pattern '<Identity' -Context 0,3 | ForEach-Object { $_.Context.PostContext; $_.Line }
+
+    - name: Build signed MSIX packages
       shell: pwsh
       run: |
-        $version = "${{ github.ref_name }}".TrimStart('v') + ".0"
-        $path = "NpiRegistry/Package.appxmanifest"
-        $xml = Get-Content $path -Raw
-        $updated = [regex]::Replace($xml, '(?s)(<Identity\b[^>]*?\bVersion=")[^"]+', "`${1}$version")
-        if ($updated -eq $xml) { throw "Identity Version not found in $path" }
-        Set-Content $path $updated -NoNewline
-        Write-Host "Package version: $version"
+        foreach ($platform in 'x64', 'ARM64') {
+          dotnet build $env:Solution_Name -c Release "-p:Platform=$platform" `
+            -p:GenerateAppxPackageOnBuild=true -p:AppxPackageSigningEnabled=true `
+            "-p:PackageCertificateKeyFile=$env:SIGN_PFX" "-p:PackageCertificatePassword=$env:SIGN_PASSWORD" `
+            "-p:AppxPackageDir=$env:GITHUB_WORKSPACE\AppPackages\"
+          if ($LASTEXITCODE -ne 0) { throw "Build failed for $platform" }
+        }
 
-    - name: Create MSIX package
-      run: >
-        dotnet build ${{ env.Solution_Name }} -c Release
-        -p:Platform=${{ matrix.platform }}
-        -p:GenerateAppxPackageOnBuild=true
-        -p:AppxPackageSigningEnabled=false
-        -p:AppxPackageDir="${{ github.workspace }}\AppPackages\"
+    - name: Verify signatures and collect release files
+      shell: pwsh
+      run: |
+        $msix = Get-ChildItem AppPackages -Recurse -Filter *.msix
+        if ($msix.Count -ne 2) { throw "Expected 2 .msix files, found $($msix.Count)" }
+        foreach ($f in $msix) {
+          $sig = Get-AuthenticodeSignature $f.FullName
+          if (-not $sig.SignerCertificate -or $sig.SignerCertificate.Thumbprint -ne $env:SIGN_THUMBPRINT) {
+            throw "$($f.Name) is not signed with the expected certificate (status: $($sig.Status))"
+          }
+          Write-Host "$($f.Name): signed by $($sig.SignerCertificate.Subject)"
+          Copy-Item $f.FullName dist
+        }
+        Copy-Item scripts\Install.ps1 dist
+        Get-ChildItem dist
 
-    - name: Upload MSIX
+    - name: Upload release files
       uses: actions/upload-artifact@v4
       with:
-        name: msix-${{ matrix.platform }}
-        path: AppPackages/**/*.msix
+        name: release-files
+        path: dist
         if-no-files-found: error
 
   release:
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: package
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-    - name: Download MSIX packages
+    - name: Download release files
       uses: actions/download-artifact@v4
       with:
-        pattern: msix-*
+        name: release-files
         path: dist
-        merge-multiple: true
 
     - name: Create GitHub release
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-        mapfile -t files < <(find dist -name '*.msix')
-        printf 'Attaching:\n%s\n' "${files[@]}"
-        gh release create "${{ github.ref_name }}" "${files[@]}" \
+        ls -l dist
+        gh release create "${{ github.ref_name }}" dist/* \
           --repo "${{ github.repository }}" \
           --title "${{ github.ref_name }}" \
           --generate-notes \
-          --notes "These MSIX packages are **unsigned**. Windows will not install an unsigned MSIX until you sign it with a certificate you trust, or you deploy from source with Visual Studio."
+          --notes "## Installing
+
+        The packages are signed with a self-signed certificate, so Windows has to be told to trust it first.
+
+        1. Download \`NpiRegistry.cer\`, \`Install.ps1\` and the \`.msix\` for your CPU (\`_x64\` or \`_ARM64\`) into one folder.
+        2. Open **PowerShell as Administrator** in that folder and run \`powershell -ExecutionPolicy Bypass -File .\\Install.ps1\`.
+        3. In Command Palette run **Reload**, then open **NPI Registry**.
+
+        Each release without a stored signing secret uses a new certificate, so re-run \`Install.ps1\` from the release you are installing."
