@@ -1,0 +1,83 @@
+name: Release
+
+# Push a tag like v1.2.3 to build the MSIX packages and attach them to a GitHub release.
+on:
+  push:
+    tags: [ "v[0-9]+.[0-9]+.[0-9]+" ]
+
+permissions:
+  contents: read
+
+env:
+  Solution_Name: NpiRegistry.sln
+
+jobs:
+  package:
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [x64, ARM64]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+
+    # v1.2.3 -> package version 1.2.3.0
+    - name: Stamp package version from tag
+      shell: pwsh
+      run: |
+        $version = "${{ github.ref_name }}".TrimStart('v') + ".0"
+        $path = "NpiRegistry/Package.appxmanifest"
+        $xml = Get-Content $path -Raw
+        $updated = [regex]::Replace($xml, '(?s)(<Identity\b[^>]*?\bVersion=")[^"]+', "`${1}$version")
+        if ($updated -eq $xml) { throw "Identity Version not found in $path" }
+        Set-Content $path $updated -NoNewline
+        Write-Host "Package version: $version"
+
+    - name: Create MSIX package
+      run: >
+        dotnet build ${{ env.Solution_Name }} -c Release
+        -p:Platform=${{ matrix.platform }}
+        -p:GenerateAppxPackageOnBuild=true
+        -p:AppxPackageSigningEnabled=false
+        -p:AppxPackageDir="${{ github.workspace }}\AppPackages\"
+
+    - name: Upload MSIX
+      uses: actions/upload-artifact@v4
+      with:
+        name: msix-${{ matrix.platform }}
+        path: AppPackages/**/*.msix
+        if-no-files-found: error
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download MSIX packages
+      uses: actions/download-artifact@v4
+      with:
+        pattern: msix-*
+        path: dist
+        merge-multiple: true
+
+    - name: Create GitHub release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        mapfile -t files < <(find dist -name '*.msix')
+        printf 'Attaching:\n%s\n' "${files[@]}"
+        gh release create "${{ github.ref_name }}" "${files[@]}" \
+          --repo "${{ github.repository }}" \
+          --title "${{ github.ref_name }}" \
+          --generate-notes \
+          --notes "These MSIX packages are **unsigned**. Windows will not install an unsigned MSIX until you sign it with a certificate you trust, or you deploy from source with Visual Studio."
