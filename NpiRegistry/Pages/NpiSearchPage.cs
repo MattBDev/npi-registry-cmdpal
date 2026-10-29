@@ -97,7 +97,7 @@ internal sealed partial class NpiSearchPage : DynamicListPage
         var location = r.Addresses?.FirstOrDefault(a => a.Purpose == "LOCATION") ?? r.Addresses?.FirstOrDefault();
         var primary = r.Taxonomies?.FirstOrDefault(t => t.Primary) ?? r.Taxonomies?.FirstOrDefault();
         var address = FormatAddress(location);
-        var cityState = location is null ? null : $"{Title(location.City)}, {location.State}";
+        var cityState = location is null ? null : $"{Cap(location.City)}, {location.State}";
 
         var more = new List<IContextItem>
         {
@@ -136,7 +136,7 @@ internal sealed partial class NpiSearchPage : DynamicListPage
         var b = r.Basic;
         if (r.IsOrganization)
         {
-            return Title(b.OrganizationName);
+            return Cap(b.OrganizationName);
         }
 
         var parts = new[] { b.NamePrefix, b.FirstName, b.MiddleName, b.LastName }
@@ -146,7 +146,7 @@ internal sealed partial class NpiSearchPage : DynamicListPage
         return string.IsNullOrWhiteSpace(b.Credential) ? name : $"{name}, {b.Credential!.Trim()}";
     }
 
-    private static string Title(string? s) =>
+    private static string Cap(string? s) =>
         string.IsNullOrWhiteSpace(s) ? "" : Text.ToTitleCase(s.Trim().ToLowerInvariant());
 
     private static string FormatAddress(NpiAddress? a)
@@ -157,8 +157,8 @@ internal sealed partial class NpiSearchPage : DynamicListPage
         }
 
         var zip = a.PostalCode is { Length: 9 } z ? $"{z[..5]}-{z[5..]}" : a.PostalCode;
-        var line1 = string.Join(", ", new[] { Title(a.Address1), Title(a.Address2) }.Where(s => s.Length > 0));
-        var line2 = $"{Title(a.City)}, {a.State} {zip}".Trim();
+        var line1 = string.Join(", ", new[] { Cap(a.Address1), Cap(a.Address2) }.Where(s => s.Length > 0));
+        var line2 = $"{Cap(a.City)}, {a.State} {zip}".Trim();
         return $"{line1}, {line2}";
     }
 
@@ -180,8 +180,8 @@ internal sealed partial class NpiSearchPage : DynamicListPage
 
         if (r.IsOrganization && !string.IsNullOrWhiteSpace(r.Basic.AuthorizedOfficialLastName))
         {
-            var official = Title($"{r.Basic.AuthorizedOfficialFirstName} {r.Basic.AuthorizedOfficialLastName}");
-            sb.AppendLine($"**Authorized official:** {official} {Title(r.Basic.AuthorizedOfficialTitle)}  ".TrimEnd() + "  ");
+            var official = Cap($"{r.Basic.AuthorizedOfficialFirstName} {r.Basic.AuthorizedOfficialLastName}");
+            sb.AppendLine($"**Authorized official:** {official} {Cap(r.Basic.AuthorizedOfficialTitle)}  ".TrimEnd() + "  ");
         }
 
         if (r.Taxonomies is { Count: > 0 })
@@ -198,7 +198,7 @@ internal sealed partial class NpiSearchPage : DynamicListPage
         {
             foreach (var a in r.Addresses)
             {
-                sb.AppendLine().AppendLine($"### {Title(a.Purpose)} address");
+                sb.AppendLine().AppendLine($"### {Cap(a.Purpose)} address");
                 sb.AppendLine(FormatAddress(a) + "  ");
                 if (!string.IsNullOrWhiteSpace(a.Phone))
                 {
