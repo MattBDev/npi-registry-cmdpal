@@ -7,19 +7,20 @@ namespace NpiRegistry;
 public class Program
 {
     [MTAThread]
-    public static async Task Main(string[] args)
+    public static void Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "-RegisterProcessAsComServer")
         {
-            global::WinRT.ComWrappersSupport.InitializeComWrappers();
-            await using var server = new ComServer();
+            ComServer server = new();
 
-            var extensionDisposedEvent = new ManualResetEvent(false);
-            var extensionInstance = new NpiRegistry(extensionDisposedEvent);
+            ManualResetEvent extensionDisposedEvent = new(false);
 
+            // One extension instance, returned every time the host asks for IExtension.
+            NpiRegistry extensionInstance = new(extensionDisposedEvent);
             server.RegisterClass<NpiRegistry, IExtension>(() => extensionInstance);
             server.Start();
 
+            // Block until the extension class signals that it was disposed.
             extensionDisposedEvent.WaitOne();
             server.Stop();
             server.UnsafeDispose();

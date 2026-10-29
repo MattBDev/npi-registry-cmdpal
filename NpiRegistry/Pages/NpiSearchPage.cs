@@ -21,8 +21,7 @@ internal sealed partial class NpiSearchPage : DynamicListPage
     public NpiSearchPage()
     {
         Icon = new IconInfo("");
-        Title = "NPI Registry";
-        Name = "Search";
+        Name = Title = "NPI Registry";
         PlaceholderText = "NPI, provider name, or org:organization  (add \"in WA\" for a state)";
         ShowDetails = true;
     }
